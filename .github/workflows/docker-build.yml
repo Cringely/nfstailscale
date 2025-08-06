@@ -1,56 +1,91 @@
-name: "Dockerfile build"
-on: 
-  workflow_dispatch:
-  push:
-    branches:
-    - main
-  pull_request:
-    branches:
-      - "*"
+name: Gated Security and Build Pipeline
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
-      
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
 jobs:
-  deploy:
+  security_gate:
+    name: Build and Security Scan
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
-      attestations: write
-      id-token: write
-      
+      security-events: write # for CodeQL to upload SARIF results
+      actions: read # for CodeQL
+
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Log in to the Container registry
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+      # ----- SAST/SCA Gate with CodeQL -----
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
 
-    - name: Extract metadata (tags, labels) for Docker
-      id: meta
-      uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-    
-    - name: Build and push Docker image
-      id: push
-      uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
-      with:
-        context: .
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-          
-    # - name: Generate artifact attestation
-    #   uses: actions/attest-build-provenance@v2
-    #   with:
-    #     subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}
-    #     subject-digest: ${{ steps.push.outputs.digest }}
-    #     push-to-registry: true
-          
+      # The 'autobuild' step will run 'npm ci' which is needed for CodeQL to analyze dependencies.
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+      # ----- Container Vulnerability Scan Gate with Trivy -----
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build container image
+        id: build_image
+        uses: docker/build-push-action@v5
+        with:
+          context:.
+          # Do not push the image, only load it to the local Docker daemon for scanning
+          load: true
+          tags: hello-world-app:latest
+
+      - name: Scan container image for vulnerabilities
+        uses: crazy-max/ghaction-container-scan@v3
+        with:
+          image: hello-world-app:latest
+          # Fail the build if any HIGH or CRITICAL severity vulnerabilities are found
+          severity_threshold: HIGH
+          # Create annotations for vulnerabilities in the workflow logs
+          annotations: true
+
+  # This job will only run if the 'security_gate' job completes successfully.
+  deploy_to_staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: security_gate
+
+    # Add permissions for pushing to GitHub Packages (Container Registry)
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to the GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context:.
+          push: true
+          tags: ghcr.io/${{ github.repository }}:latest
+
+      - name: Deployment Step
+        run: |
+          echo "Security gate passed. All scans were successful."
+          echo "Image pushed to ghcr.io/${{ github.repository }}:latest"
+          echo "Proceeding with deployment to the staging environment..."
+          # Add your deployment scripts here, e.g., kubectl apply, etc.

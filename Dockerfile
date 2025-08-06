@@ -1,3 +1,22 @@
-FROM alpine:latest
-RUN apk upgrade --no-cache && apk add --no-cache ca-certificates iptables iproute2 ip6tables tailscale nfs-utils bash && \
-    rm /sbin/halt /sbin/poweroff /sbin/reboot
+# Dockerfile
+
+# Use an official Node.js runtime as a parent image
+FROM node:20-alpine
+
+# Set the working directory in the container
+WORKDIR /usr/src/app
+
+# Copy package.json and package-lock.json to the working directory
+COPY package*.json./
+
+# Install any needed packages
+RUN npm ci --only=production
+
+# Copy the rest of the application source code
+COPY..
+
+# Make port 3000 available to the world outside this container
+EXPOSE 3000
+
+# Define the command to run the app
+CMD [ "node", "app.js" ]
