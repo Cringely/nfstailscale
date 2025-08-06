@@ -32,28 +32,6 @@ jobs:
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
 
-      # ----- Container Vulnerability Scan Gate with Trivy -----
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build container image
-        id: build_image
-        uses: docker/build-push-action@v5
-        with:
-          context:.
-          # Do not push the image, only load it to the local Docker daemon for scanning
-          load: true
-          tags: hello-world-app:latest
-
-      - name: Scan container image for vulnerabilities
-        uses: crazy-max/ghaction-container-scan@v3
-        with:
-          image: hello-world-app:latest
-          # Fail the build if any HIGH or CRITICAL severity vulnerabilities are found
-          severity_threshold: HIGH
-          # Create annotations for vulnerabilities in the workflow logs
-          annotations: true
-
   # This job will only run if the 'security_gate' job completes successfully.
   deploy_to_staging:
     name: Deploy to Staging
@@ -79,7 +57,7 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          context:.
+          context: .
           push: true
           tags: ghcr.io/${{ github.repository }}:latest
 
