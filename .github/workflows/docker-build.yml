@@ -1,19 +1,50 @@
-name: Gated Security and Build Pipeline
+name: Template - Build and Scan
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  workflow_call:
+    inputs:
+      language:
+        description: 'The primary language of the repository for CodeQL scanning'
+        required: true
+        type: string
+      image-name:
+        description: 'The name of the docker image to build and scan'
+        required: true
+        type: string
+      acr-name:
+        description: 'The name of the Azure Container Registry'
+        required: true
+        type: string
+      config-file:
+        description: 'Path to the CodeQL configuration file'
+        required: false
+        type: string
+    secrets:
+      CONFIG_REPO_TOKEN:
+        description: 'A token with read access to the central configuration repository'
+        required: false
+      AZURE_CREDENTIALS:
+        description: 'Azure Service Principal credentials for logging in'
+        required: true
+      MDC_CLIENT_ID:
+        description: 'Client ID for Defender for Cloud API token'
+        required: true
+      MDC_CLIENT_SECRET:
+        description: 'Client Secret for Defender for Cloud API token'
+        required: true
+      MDC_TENANT_ID:
+        description: 'Tenant ID for Defender for Cloud API token'
+        required: true
 
 jobs:
-  security_gate:
-    name: Build and Security Scan
+  build_and_scan_gate:
+    name: Build, SAST, SCA & Container Scan
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write # for CodeQL to upload SARIF results
-      actions: read # for CodeQL
+      security-events: write
+      id-token: write # Required for azure/login
+      actions: read
 
     steps:
       - name: Checkout repository
@@ -23,47 +54,46 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
-          languages: javascript
+          languages: ${{ inputs.language }}
+          config-file: ${{ inputs.config-file }}
+          token: ${{ secrets.CONFIG_REPO_TOKEN }}
 
-      # The 'autobuild' step will run 'npm ci' which is needed for CodeQL to analyze dependencies.
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
 
-  # This job will only run if the 'security_gate' job completes successfully.
-  deploy_to_staging:
-    name: Deploy to Staging
-    runs-on: ubuntu-latest
-    needs: security_gate
+      # ----- Build and Push Container to ACR -----
+      - name: Log in to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-    # Add permissions for pushing to GitHub Packages (Container Registry)
-    permissions:
-      contents: read
-      packages: write
+      - name: Build and push container image to ACR
+        uses: docker/build-push-action@v5
+        with:
+          context:.
+          push: true
+          tags: ${{ inputs.acr-name }}.azurecr.io/${{ inputs.image-name }}:${{ github.sha }}
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      # ----- Container Scan Gate with Microsoft Defender for Cloud -----
+      - name: Run Microsoft Security DevOps container scan
+        uses: microsoft/security-devops-action@v1
+        id: msdo
+        with:
+          categories: 'containers'
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.MDC_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.MDC_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.MDC_TENANT_ID }}
+          GDN_TRIVY_TARGET: ${{ inputs.acr-name }}.azurecr.io/${{ inputs.image-name }}:${{ github.sha }}
+          # SECURITY GATE: Fail the build if Trivy finds any MEDIUM severity or higher vulnerabilities.
+          GDN_RUN_BREAKTOOL: trivy:MEDIUM
 
-      # - name: Log in to the GitHub Container Registry
-      #   uses: docker/login-action@v3
-      #   with:
-      #     registry: ghcr.io
-      #     username: ${{ github.actor }}
-      #     password: ${{ secrets.GITHUB_TOKEN }}
-
-      # - name: Build and push Docker image
-      #   uses: docker/build-push-action@v5
-      #   with:
-      #     context: .
-      #     push: true
-      #     tags: ghcr.io/${{ github.repository }}:latest
-
-      - name: Deployment Step
-        run: |
-          echo "Security gate passed. All scans were successful."
-          echo "Image pushed to ghcr.io/${{ github.repository }}:latest"
-          echo "Proceeding with deployment to the staging environment..."
-          # Add your deployment scripts here, e.g., kubectl apply, etc.
+      # ----- Upload Scan Results to GitHub Security Tab -----
+      - name: Upload SARIF results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() # Run this step even if the scan fails to ensure results are visible
+        with:
+          sarif_file: ${{ steps.msdo.outputs.sarifFile }}
