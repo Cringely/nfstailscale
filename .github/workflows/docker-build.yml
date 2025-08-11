@@ -73,7 +73,7 @@ jobs:
       - name: Build and push container image to ACR
         uses: docker/build-push-action@v5
         with:
-          context:.
+          context: .
           push: true
           tags: ${{ inputs.acr-name }}.azurecr.io/${{ inputs.image-name }}:${{ github.sha }}
 
